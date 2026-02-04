@@ -341,7 +341,8 @@ class CLIProxyManager:
         """
         Get list of all providers with their authentication status.
 
-        Checks credential files to determine which providers are authenticated.
+        When CLI Proxy is authenticated, marks the login_provider as authenticated.
+        Also checks credential files for other providers.
 
         Returns:
             List of ProviderInfo with authentication status.
@@ -372,18 +373,22 @@ class CLIProxyManager:
                 email=None,
             )
 
-            # Check if credential files exist for this provider
-            patterns = credential_patterns.get(provider_id, [f"{provider_id}-*.json"])
-            for search_dir in search_dirs:
-                if not search_dir.exists():
-                    continue
-                for pattern in patterns:
-                    matching_files = list(search_dir.glob(pattern))
-                    if matching_files:
-                        provider_info.authenticated = True
+            # If CLI Proxy is authenticated and this is the login provider, mark as authenticated
+            if self.status == CLIProxyStatus.AUTHENTICATED and provider_id == self.login_provider:
+                provider_info.authenticated = True
+            else:
+                # Check if credential files exist for this provider
+                patterns = credential_patterns.get(provider_id, [f"{provider_id}-*.json"])
+                for search_dir in search_dirs:
+                    if not search_dir.exists():
+                        continue
+                    for pattern in patterns:
+                        matching_files = list(search_dir.glob(pattern))
+                        if matching_files:
+                            provider_info.authenticated = True
+                            break
+                    if provider_info.authenticated:
                         break
-                if provider_info.authenticated:
-                    break
 
             providers.append(provider_info)
 

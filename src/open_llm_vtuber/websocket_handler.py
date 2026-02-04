@@ -106,6 +106,7 @@ class WebSocketHandler:
             "trigger-oauth-login": self._handle_trigger_oauth_login,
             "revoke-oauth": self._handle_revoke_oauth,
             "get-llm-info": self._handle_get_llm_info,
+            "change-model": self._handle_change_model,
         }
 
     async def handle_new_connection(
@@ -931,6 +932,86 @@ class WebSocketHandler:
                     {
                         "type": "llm-info",
                         "error": str(e),
+                    }
+                )
+            )
+
+    async def _handle_change_model(
+        self, websocket: WebSocket, client_uid: str, data: WSMessage
+    ) -> None:
+        """Handle request to change the LLM model"""
+        import yaml as pyyaml
+        from pathlib import Path
+
+        model_id = data.get("model_id", "")
+
+        if not model_id:
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "change-model-result",
+                        "success": False,
+                        "message": "Model ID not specified",
+                    }
+                )
+            )
+            return
+
+        try:
+            config_path = Path("conf.yaml")
+
+            # Read current config
+            with open(config_path, "r", encoding="utf-8") as f:
+                config_data = pyyaml.safe_load(f)
+
+            if not config_data:
+                raise ValueError("Empty config file")
+
+            # Navigate to the model setting and update it
+            # Path: character_config -> agent_config -> llm_configs -> openai_compatible_llm -> model
+            # Ensure all nested dicts exist and maintain references
+            if "character_config" not in config_data:
+                config_data["character_config"] = {}
+            if "agent_config" not in config_data["character_config"]:
+                config_data["character_config"]["agent_config"] = {}
+            if "llm_configs" not in config_data["character_config"]["agent_config"]:
+                config_data["character_config"]["agent_config"]["llm_configs"] = {}
+            if "openai_compatible_llm" not in config_data["character_config"]["agent_config"]["llm_configs"]:
+                config_data["character_config"]["agent_config"]["llm_configs"]["openai_compatible_llm"] = {}
+
+            openai_compatible = config_data["character_config"]["agent_config"]["llm_configs"]["openai_compatible_llm"]
+            old_model = openai_compatible.get("model", "")
+            openai_compatible["model"] = model_id
+
+            # Save updated config
+            with open(config_path, "w", encoding="utf-8") as f:
+                pyyaml.dump(config_data, f, allow_unicode=True, default_flow_style=False)
+
+            logger.info(f"Model changed from '{old_model}' to '{model_id}'")
+
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "change-model-result",
+                        "success": True,
+                        "message": f"Model changed to {model_id}. Restart the conversation for the change to take effect.",
+                        "old_model": old_model,
+                        "new_model": model_id,
+                    }
+                )
+            )
+
+            # Send updated LLM info
+            await self._handle_get_llm_info(websocket, client_uid, {})
+
+        except Exception as e:
+            logger.error(f"Error changing model: {e}")
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "change-model-result",
+                        "success": False,
+                        "message": f"Error: {str(e)}",
                     }
                 )
             )
