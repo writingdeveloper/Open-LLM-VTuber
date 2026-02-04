@@ -5,6 +5,15 @@ system_config:
   port: 12393
   # New setting for alternative configurations
   config_alts_dir: 'characters'
+
+  # CLIProxyAPI integration for Claude API access via OAuth
+  # This allows using Claude API without an API key by leveraging CLIProxyAPI
+  # Install: https://github.com/anthropics/cli-proxy-api
+  cli_proxy_config:
+    enabled: false # Set to true to auto-start CLIProxyAPI with the server
+    port: 8317 # Port for CLIProxyAPI server
+    login_provider: 'claude' # OAuth provider ('claude', 'google', etc.)
+
   # Tool prompts that will be appended to the persona prompt
   tool_prompts:
     # This will be appended to the end of system prompt to let LLM include keywords to control facial expressions.

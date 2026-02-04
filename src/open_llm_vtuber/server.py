@@ -8,6 +8,7 @@ It uses FastAPI for the server and Starlette for static file serving.
 
 import os
 import shutil
+from typing import Optional
 
 from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
@@ -17,6 +18,7 @@ from starlette.staticfiles import StaticFiles as StarletteStaticFiles
 from .routes import init_client_ws_route, init_webtool_routes, init_proxy_route
 from .service_context import ServiceContext
 from .config_manager.utils import Config
+from .cli_proxy_manager import CLIProxyManager
 
 
 # Create a custom StaticFiles class that adds CORS headers
@@ -71,13 +73,19 @@ class WebSocketServer:
         - Use `clean_cache()` to clear and recreate the local cache directory.
     """
 
-    def __init__(self, config: Config, default_context_cache: ServiceContext = None):
+    def __init__(
+        self,
+        config: Config,
+        default_context_cache: ServiceContext = None,
+        cli_proxy_manager: Optional[CLIProxyManager] = None,
+    ):
         self.app = FastAPI(title="Open-LLM-VTuber Server")  # Added title for clarity
         self.config = config
         self.default_context_cache = (
             default_context_cache or ServiceContext()
         )  # Use provided context or initialize a new empty one waiting to be loaded
         # It will be populated during the initialize method call
+        self.cli_proxy_manager = cli_proxy_manager
 
         # Add global CORS middleware
         self.app.add_middleware(
@@ -91,7 +99,10 @@ class WebSocketServer:
         # Include routes, passing the context instance
         # The context will be populated during the initialize step
         self.app.include_router(
-            init_client_ws_route(default_context_cache=self.default_context_cache),
+            init_client_ws_route(
+                default_context_cache=self.default_context_cache,
+                cli_proxy_manager=self.cli_proxy_manager,
+            ),
         )
         self.app.include_router(
             init_webtool_routes(default_context_cache=self.default_context_cache),

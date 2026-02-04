@@ -1,6 +1,7 @@
 import os
 import json
 from uuid import uuid4
+from typing import Optional
 import numpy as np
 from datetime import datetime
 from fastapi import APIRouter, WebSocket, UploadFile, File, Response
@@ -10,21 +11,26 @@ from loguru import logger
 from .service_context import ServiceContext
 from .websocket_handler import WebSocketHandler
 from .proxy_handler import ProxyHandler
+from .cli_proxy_manager import CLIProxyManager
 
 
-def init_client_ws_route(default_context_cache: ServiceContext) -> APIRouter:
+def init_client_ws_route(
+    default_context_cache: ServiceContext,
+    cli_proxy_manager: Optional[CLIProxyManager] = None,
+) -> APIRouter:
     """
     Create and return API routes for handling the `/client-ws` WebSocket connections.
 
     Args:
         default_context_cache: Default service context cache for new sessions.
+        cli_proxy_manager: Optional CLI proxy manager for authentication status.
 
     Returns:
         APIRouter: Configured router with WebSocket endpoint.
     """
 
     router = APIRouter()
-    ws_handler = WebSocketHandler(default_context_cache)
+    ws_handler = WebSocketHandler(default_context_cache, cli_proxy_manager)
 
     @router.websocket("/client-ws")
     async def websocket_endpoint(websocket: WebSocket):

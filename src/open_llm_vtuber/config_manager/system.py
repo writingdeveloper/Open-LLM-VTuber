@@ -1,7 +1,37 @@
 # config_manager/system.py
 from pydantic import Field, model_validator
-from typing import Dict, ClassVar
+from typing import Dict, ClassVar, Optional
 from .i18n import I18nMixin, Description
+
+
+class CLIProxyConfig(I18nMixin):
+    """Configuration for CLIProxyAPI integration."""
+
+    enabled: bool = Field(False, alias="enabled")
+    port: int = Field(8317, alias="port")
+    login_provider: str = Field("claude", alias="login_provider")
+
+    DESCRIPTIONS: ClassVar[Dict[str, Description]] = {
+        "enabled": Description(
+            en="Enable CLIProxyAPI auto-start",
+            zh="启用 CLIProxyAPI 自动启动",
+        ),
+        "port": Description(
+            en="Port for CLIProxyAPI server",
+            zh="CLIProxyAPI 服务器端口",
+        ),
+        "login_provider": Description(
+            en="OAuth login provider (e.g., 'claude')",
+            zh="OAuth 登录提供商（例如 'claude'）",
+        ),
+    }
+
+    @model_validator(mode="after")
+    def check_port(cls, values):
+        port = values.port
+        if port < 0 or port > 65535:
+            raise ValueError("CLIProxy port must be between 0 and 65535")
+        return values
 
 
 class SystemConfig(I18nMixin):
@@ -13,6 +43,9 @@ class SystemConfig(I18nMixin):
     config_alts_dir: str = Field(..., alias="config_alts_dir")
     tool_prompts: Dict[str, str] = Field(..., alias="tool_prompts")
     enable_proxy: bool = Field(False, alias="enable_proxy")
+    cli_proxy_config: Optional[CLIProxyConfig] = Field(
+        default=None, alias="cli_proxy_config"
+    )
 
     DESCRIPTIONS: ClassVar[Dict[str, Description]] = {
         "conf_version": Description(en="Configuration version", zh="配置文件版本"),
@@ -28,6 +61,10 @@ class SystemConfig(I18nMixin):
         "enable_proxy": Description(
             en="Enable proxy mode for multiple clients",
             zh="启用代理模式以支持多个客户端使用一个 ws 连接",
+        ),
+        "cli_proxy_config": Description(
+            en="CLIProxyAPI integration configuration",
+            zh="CLIProxyAPI 集成配置",
         ),
     }
 

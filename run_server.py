@@ -12,6 +12,11 @@ from upgrade_codes.upgrade_manager import UpgradeManager
 
 from src.open_llm_vtuber.server import WebSocketServer
 from src.open_llm_vtuber.config_manager import Config, read_yaml, validate_config
+from src.open_llm_vtuber.cli_proxy_manager import (
+    CLIProxyManager,
+    CLIProxyStatus,
+    set_cli_proxy_manager,
+)
 
 os.environ["HF_HOME"] = str(Path(__file__).parent / "models")
 os.environ["MODELSCOPE_CACHE"] = str(Path(__file__).parent / "models")
@@ -113,11 +118,82 @@ def parse_args():
     parser.add_argument(
         "--hf_mirror", action="store_true", help="Use Hugging Face mirror"
     )
+    parser.add_argument(
+        "--with-cli-proxy",
+        action="store_true",
+        help="Auto-start CLIProxyAPI for Claude API access via OAuth",
+    )
     return parser.parse_args()
 
 
+# Global CLI proxy manager reference for cleanup
+_cli_proxy_manager: CLIProxyManager | None = None
+
+
+def cleanup_cli_proxy():
+    """Cleanup function to stop CLIProxyAPI on exit."""
+    global _cli_proxy_manager
+    if _cli_proxy_manager is not None:
+        _cli_proxy_manager.stop()
+
+
+async def init_cli_proxy(
+    config: Config, force_enable: bool = False
+) -> CLIProxyManager | None:
+    """
+    Initialize CLIProxyAPI if enabled in config or via CLI flag.
+
+    Args:
+        config: Server configuration.
+        force_enable: Force enable CLI proxy (from --with-cli-proxy flag).
+
+    Returns:
+        CLIProxyManager instance if enabled, None otherwise.
+    """
+    global _cli_proxy_manager
+
+    cli_proxy_config = config.system_config.cli_proxy_config
+    enabled = force_enable or (
+        cli_proxy_config is not None and cli_proxy_config.enabled
+    )
+
+    if not enabled:
+        return None
+
+    # Get config values or use defaults
+    port = cli_proxy_config.port if cli_proxy_config else 8317
+    login_provider = cli_proxy_config.login_provider if cli_proxy_config else "claude"
+
+    manager = CLIProxyManager(port=port, login_provider=login_provider)
+    _cli_proxy_manager = manager
+    set_cli_proxy_manager(manager)
+
+    # Register cleanup handler
+    atexit.register(cleanup_cli_proxy)
+
+    # Start and check authentication
+    logger.info("Starting CLIProxyAPI...")
+    status = await manager.start_and_wait_for_ready(timeout=10.0)
+
+    if status == CLIProxyStatus.NOT_RUNNING:
+        logger.warning(
+            "CLIProxyAPI executable not found. "
+            "Install it from: https://github.com/anthropics/cli-proxy-api"
+        )
+        return manager
+
+    if status == CLIProxyStatus.NOT_AUTHENTICATED:
+        manager.print_auth_warning()
+
+    elif status == CLIProxyStatus.AUTHENTICATED:
+        logger.info("CLIProxyAPI is authenticated and ready")
+        logger.info(f"Claude API available at: {manager.get_base_url()}/v1")
+
+    return manager
+
+
 @logger.catch
-def run(console_log_level: str):
+def run(console_log_level: str, with_cli_proxy: bool = False):
     init_logger(console_log_level)
     logger.info(f"Open-LLM-VTuber, version v{get_version()}")
 
@@ -139,11 +215,18 @@ def run(console_log_level: str):
     config: Config = validate_config(read_yaml("conf.yaml"))
     server_config = config.system_config
 
+    # Initialize CLIProxyAPI if enabled
+    cli_proxy_manager = asyncio.run(init_cli_proxy(config, force_enable=with_cli_proxy))
+    if cli_proxy_manager is not None:
+        logger.info(
+            f"CLIProxyAPI manager initialized (status: {cli_proxy_manager.status.value})"
+        )
+
     if server_config.enable_proxy:
         logger.info("Proxy mode enabled - /proxy-ws endpoint will be available")
 
     # Initialize the WebSocket server (synchronous part)
-    server = WebSocketServer(config=config)
+    server = WebSocketServer(config=config, cli_proxy_manager=cli_proxy_manager)
 
     # Perform asynchronous initialization (loading context, etc.)
     logger.info("Initializing server context...")
@@ -175,4 +258,6 @@ if __name__ == "__main__":
         )
     if args.hf_mirror:
         os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-    run(console_log_level=console_log_level)
+    if args.with_cli_proxy:
+        logger.info("CLIProxyAPI auto-start enabled via command line")
+    run(console_log_level=console_log_level, with_cli_proxy=args.with_cli_proxy)

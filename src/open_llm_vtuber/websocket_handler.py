@@ -27,6 +27,7 @@ from .conversations.conversation_handler import (
     handle_group_interrupt,
     handle_individual_interrupt,
 )
+from .cli_proxy_manager import CLIProxyManager, CLIProxyStatus
 
 
 class MessageType(Enum):
@@ -61,7 +62,11 @@ class WSMessage(TypedDict, total=False):
 class WebSocketHandler:
     """Handles WebSocket connections and message routing"""
 
-    def __init__(self, default_context_cache: ServiceContext):
+    def __init__(
+        self,
+        default_context_cache: ServiceContext,
+        cli_proxy_manager: Optional[CLIProxyManager] = None,
+    ):
         """Initialize the WebSocket handler with default context"""
         self.client_connections: Dict[str, WebSocket] = {}
         self.client_contexts: Dict[str, ServiceContext] = {}
@@ -69,6 +74,7 @@ class WebSocketHandler:
         self.current_conversation_tasks: Dict[str, Optional[asyncio.Task]] = {}
         self.default_context_cache = default_context_cache
         self.received_data_buffers: Dict[str, np.ndarray] = {}
+        self.cli_proxy_manager = cli_proxy_manager
 
         # Message handlers mapping
         self._message_handlers = self._init_message_handlers()
@@ -95,6 +101,11 @@ class WebSocketHandler:
             "audio-play-start": self._handle_audio_play_start,
             "request-init-config": self._handle_init_config_request,
             "heartbeat": self._handle_heartbeat,
+            "request-cli-proxy-status": self._handle_cli_proxy_status_request,
+            "get-oauth-providers": self._handle_get_oauth_providers,
+            "trigger-oauth-login": self._handle_trigger_oauth_login,
+            "revoke-oauth": self._handle_revoke_oauth,
+            "get-llm-info": self._handle_get_llm_info,
         }
 
     async def handle_new_connection(
@@ -171,6 +182,9 @@ class WebSocketHandler:
 
         # Send initial group status
         await self.send_group_update(websocket, client_uid)
+
+        # Send CLI proxy status if manager is available
+        await self._send_cli_proxy_status(websocket)
 
         # Start microphone
         await websocket.send_text(json.dumps({"type": "control", "text": "start-mic"}))
@@ -610,3 +624,313 @@ class WebSocketHandler:
             await websocket.send_json({"type": "heartbeat-ack"})
         except Exception as e:
             logger.error(f"Error sending heartbeat acknowledgment: {e}")
+
+    async def _send_cli_proxy_status(self, websocket: WebSocket) -> None:
+        """Send CLI proxy authentication status to the client"""
+        if self.cli_proxy_manager is None:
+            return
+
+        try:
+            status = await self.cli_proxy_manager.check_authentication()
+            status_message = self._get_cli_proxy_status_message(status)
+
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "cli-proxy-status",
+                        "status": status.value,
+                        "message": status_message,
+                    }
+                )
+            )
+        except Exception as e:
+            logger.error(f"Error sending CLI proxy status: {e}")
+
+    def _get_cli_proxy_status_message(self, status: CLIProxyStatus) -> str:
+        """Get a user-friendly message for CLI proxy status"""
+        messages = {
+            CLIProxyStatus.NOT_RUNNING: (
+                "CLIProxyAPI is not running. "
+                f"Run '{self.cli_proxy_manager.get_login_command()}' in a separate terminal."
+            ),
+            CLIProxyStatus.AUTHENTICATED: "CLIProxyAPI is authenticated and ready.",
+            CLIProxyStatus.NOT_AUTHENTICATED: (
+                "CLIProxyAPI requires authentication. "
+                f"Run '{self.cli_proxy_manager.get_login_command()}' in a separate terminal."
+            ),
+            CLIProxyStatus.ERROR: "CLIProxyAPI encountered an error.",
+        }
+        return messages.get(status, "Unknown CLI proxy status")
+
+    async def _handle_cli_proxy_status_request(
+        self, websocket: WebSocket, client_uid: str, data: WSMessage
+    ) -> None:
+        """Handle request for CLI proxy authentication status"""
+        await self._send_cli_proxy_status(websocket)
+
+    async def _handle_get_oauth_providers(
+        self, websocket: WebSocket, client_uid: str, data: WSMessage
+    ) -> None:
+        """Handle request for OAuth providers list with authentication status"""
+        try:
+            if self.cli_proxy_manager is None:
+                await websocket.send_text(
+                    json.dumps(
+                        {
+                            "type": "oauth-providers",
+                            "providers": [],
+                            "message": "CLIProxyAPI is not configured",
+                        }
+                    )
+                )
+                return
+
+            providers = await self.cli_proxy_manager.get_authenticated_providers()
+            providers_data = [
+                {
+                    "name": p.name,
+                    "display_name": p.display_name,
+                    "authenticated": p.authenticated,
+                    "email": p.email,
+                }
+                for p in providers
+            ]
+
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "oauth-providers",
+                        "providers": providers_data,
+                    }
+                )
+            )
+        except Exception as e:
+            logger.error(f"Error getting OAuth providers: {e}")
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "oauth-providers",
+                        "providers": [],
+                        "message": f"Error: {str(e)}",
+                    }
+                )
+            )
+
+    async def _handle_trigger_oauth_login(
+        self, websocket: WebSocket, client_uid: str, data: WSMessage
+    ) -> None:
+        """Handle request to trigger OAuth login for a specific provider"""
+        provider = data.get("provider", "")
+
+        if not provider:
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "oauth-login-result",
+                        "success": False,
+                        "message": "Provider not specified",
+                    }
+                )
+            )
+            return
+
+        if self.cli_proxy_manager is None:
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "oauth-login-result",
+                        "success": False,
+                        "message": "CLIProxyAPI is not configured",
+                    }
+                )
+            )
+            return
+
+        try:
+            # Notify client that login is starting
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "oauth-login-started",
+                        "provider": provider,
+                        "message": f"Starting {provider} authentication... Please check your browser.",
+                    }
+                )
+            )
+
+            # Trigger OAuth login
+            result = await self.cli_proxy_manager.trigger_oauth_login(provider)
+
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "oauth-login-result",
+                        "provider": provider,
+                        "success": result.get("success", False),
+                        "message": result.get("message", ""),
+                    }
+                )
+            )
+
+            # If successful, send updated providers list
+            if result.get("success"):
+                await self._handle_get_oauth_providers(websocket, client_uid, {})
+
+        except Exception as e:
+            logger.error(f"Error triggering OAuth login: {e}")
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "oauth-login-result",
+                        "provider": provider,
+                        "success": False,
+                        "message": f"Error: {str(e)}",
+                    }
+                )
+            )
+
+    async def _handle_revoke_oauth(
+        self, websocket: WebSocket, client_uid: str, data: WSMessage
+    ) -> None:
+        """Handle request to revoke OAuth authentication for a specific provider"""
+        provider = data.get("provider", "")
+
+        if not provider:
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "oauth-revoke-result",
+                        "success": False,
+                        "message": "Provider not specified",
+                    }
+                )
+            )
+            return
+
+        if self.cli_proxy_manager is None:
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "oauth-revoke-result",
+                        "success": False,
+                        "message": "CLIProxyAPI is not configured",
+                    }
+                )
+            )
+            return
+
+        try:
+            # Revoke OAuth authentication
+            result = await self.cli_proxy_manager.revoke_oauth(provider)
+
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "oauth-revoke-result",
+                        "provider": provider,
+                        "success": result.get("success", False),
+                        "message": result.get("message", ""),
+                    }
+                )
+            )
+
+            # Send updated providers list
+            await self._handle_get_oauth_providers(websocket, client_uid, {})
+
+        except Exception as e:
+            logger.error(f"Error revoking OAuth: {e}")
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "oauth-revoke-result",
+                        "provider": provider,
+                        "success": False,
+                        "message": f"Error: {str(e)}",
+                    }
+                )
+            )
+
+    def _detect_provider_from_model(self, model: str) -> str:
+        """Detect actual provider from model name."""
+        if not model:
+            return "unknown"
+        model_lower = model.lower()
+        if "claude" in model_lower:
+            return "Claude (Anthropic)"
+        elif "gpt" in model_lower or "o1" in model_lower or "o3" in model_lower:
+            return "OpenAI"
+        elif "gemini" in model_lower:
+            return "Google Gemini"
+        elif "llama" in model_lower:
+            return "Meta Llama"
+        elif "qwen" in model_lower:
+            return "Qwen (Alibaba)"
+        elif "mistral" in model_lower or "mixtral" in model_lower:
+            return "Mistral AI"
+        elif "deepseek" in model_lower:
+            return "DeepSeek"
+        return "unknown"
+
+    async def _handle_get_llm_info(
+        self, websocket: WebSocket, client_uid: str, data: WSMessage
+    ) -> None:
+        """Handle request for current LLM information"""
+        try:
+            context = self.client_contexts.get(client_uid)
+            llm_info = {
+                "type": "llm-info",
+                "provider": None,
+                "model": None,
+                "base_url": None,
+                "config_provider": None,
+                "cli_proxy_enabled": self.cli_proxy_manager is not None,
+                "available_models": [],
+            }
+
+            if context and context.character_config and context.character_config.agent_config:
+                agent_config = context.character_config.agent_config
+                agent_settings = agent_config.agent_settings
+
+                # Get current LLM provider from basic_memory_agent settings
+                if agent_settings and agent_settings.basic_memory_agent:
+                    llm_provider = agent_settings.basic_memory_agent.llm_provider
+                    llm_info["config_provider"] = llm_provider
+
+                    # Get model and base_url from llm_configs
+                    if agent_config.llm_configs:
+                        llm_configs_dict = agent_config.llm_configs.model_dump()
+                        provider_config = llm_configs_dict.get(llm_provider, {})
+                        model = provider_config.get("model")
+                        llm_info["model"] = model
+                        llm_info["base_url"] = provider_config.get("base_url")
+
+                        # Detect actual provider from model name
+                        llm_info["provider"] = self._detect_provider_from_model(model)
+
+            # Add CLI proxy status and available models if enabled
+            if self.cli_proxy_manager:
+                logger.info("CLI proxy manager is available, fetching status and models")
+                status = await self.cli_proxy_manager.check_authentication()
+                llm_info["cli_proxy_status"] = status.value
+                llm_info["cli_proxy_authenticated"] = status == CLIProxyStatus.AUTHENTICATED
+
+                # Get available models from CLI Proxy
+                try:
+                    available_models = await self.cli_proxy_manager.get_available_models()
+                    logger.info(f"Got {len(available_models)} available models")
+                    llm_info["available_models"] = available_models
+                except Exception as e:
+                    logger.warning(f"Failed to get available models: {e}")
+
+            await websocket.send_text(json.dumps(llm_info))
+
+        except Exception as e:
+            logger.error(f"Error getting LLM info: {e}")
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "llm-info",
+                        "error": str(e),
+                    }
+                )
+            )
