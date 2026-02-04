@@ -76,3 +76,6 @@ private/
 mcp_servers.json
 
 .vscode/
+
+# Local Claude Code instructions (personal use)
+CLAUDE.local.md
